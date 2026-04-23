@@ -1,6 +1,7 @@
 import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
 import { handleConnection } from './handlers/connection.js';
+import logger from './utils/logger.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -56,10 +57,13 @@ server.listen(PORT, () => {
  * before terminating the process heap.
  */
 process.on('SIGTERM', () => {
+  logger.warn({ phase: 'TEARDOWN' }, 'SIGTERM received. Draining connections...');
   wss.close(() => {
     server.close(() => {
+      logger.info({ phase: 'TEARDOWN' }, 'Server process terminated safely.');
       process.exit(0);
     });
   });
 });
+
 

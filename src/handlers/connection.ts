@@ -1,6 +1,7 @@
 import { WebSocket } from 'ws';
 import { IncomingMessage } from 'http';
 import { SessionState } from '../types/session.js';
+import logger from '../utils/logger.js';
 
 /**
  * Project Cerberus - Core Connection Handler
@@ -43,6 +44,7 @@ export const handleConnection = (ws: WebSocket, req: IncomingMessage) => {
   const candidateId = url.searchParams.get('candidateId');
 
   if (!candidateId) {
+    logger.warn({ phase: 'HANDSHAKE' }, 'Connection rejected: Missing candidateId');
     ws.close(1008, 'Missing candidateId');
     return;
   }
@@ -64,6 +66,12 @@ export const handleConnection = (ws: WebSocket, req: IncomingMessage) => {
 
     // Strict MTU enforcement: Prevents event-loop blocking by oversized buffer allocations.
     if (data.length > MAX_CHUNK_SIZE) {
+      logger.warn({ 
+        candidateId, 
+        phase: 'INGEST', 
+        byteLength: data.length, 
+        limit: MAX_CHUNK_SIZE 
+      }, 'MTU Violation: Dropping oversized chunk');
       ws.close(1009, 'Chunk size limit exceeded');
       return;
     }
@@ -105,14 +113,13 @@ export const handleConnection = (ws: WebSocket, req: IncomingMessage) => {
         // This is primarily I/O bound (LLM Call -> Mongo Save). 
         // Event loop impact: Minimal (<1ms sync time).
         await performEvaluation(state); 
-        
-        console.log(`[Session:${state.candidateId}] Scorecard persisted. Memory released.`);
+        logger.info({ candidateId, phase: 'TEARDOWN' }, 'Scorecard persisted');
       } catch (err) {
-        console.error(`[Session:${state.candidateId}] Teardown failed:`, err);
+        logger.error({ candidateId, phase: 'TEARDOWN', err }, 'Evaluation failed');
       }
     })();
 
-    console.log(`[Session:${state.candidateId}] Handshake terminated. Socket closed.`);
+    logger.info({ candidateId, phase: 'TEARDOWN' }, 'Socket closed');
   };
 
   /**
@@ -132,8 +139,9 @@ export const handleConnection = (ws: WebSocket, req: IncomingMessage) => {
   ws.on('message', (data: Buffer, isBinary: boolean) => handleMessage(data, isBinary));
   ws.on('close', handleClose);
   ws.on('error', (err) => {
-    console.error(`[Session:${state.candidateId}] Stream error:`, err.message);
+    logger.error({ candidateId, phase: 'HANDSHAKE', err }, 'WebSocket stream error');
     handleClose();
   });
 };
+
 
