@@ -37,25 +37,18 @@ export const handleConnection = (ws: WebSocket, req: IncomingMessage) => {
   }
 
   const state = createSession(candidateId);
-  let binaryChunkCount = 0; // Closure-scoped sequence counter
+  let binaryChunkCount = 0; 
 
   logger.info({ candidateId, phase: 'HANDSHAKE' }, `[👤 USER_JOINED]: Candidate ${candidateId} connected.`);
 
   const handleMessage = async (data: any, isBinary: boolean) => {
     if (isBinary) {
-      /**
-       * [ARCHITECT PROTOCOL - FORENSIC BINARY INGESTION]
-       */
+      /** [📥 INGRESS_BINARY]: Raw PCM Capture */
       const buffer = data as Buffer;
       binaryChunkCount++;
 
-      // THE 16KB LAW
       if (buffer.length > MAX_CHUNK_SIZE) {
-        logger.warn({ 
-          candidateId, 
-          phase: 'INGEST', 
-          bytes: buffer.length 
-        }, `[⚠️ MEM_VIOLATION]: Dropping chunk #${binaryChunkCount}. Size ${buffer.length} exceeds 16KB limit.`);
+        logger.warn({ candidateId, phase: 'INGEST', bytes: buffer.length }, `[⚠️ MEM_VIOLATION]: Dropping chunk #${binaryChunkCount}. Size exceeds 16KB.`);
         return;
       }
 
@@ -63,47 +56,52 @@ export const handleConnection = (ws: WebSocket, req: IncomingMessage) => {
       state.totalBytesReceived += buffer.length;
       state.lastChunkTimestamp = Date.now();
 
-      logger.debug({ 
-        candidateId, 
-        phase: 'INGEST', 
-        bytes: buffer.length,
-        seq: binaryChunkCount 
-      }, `[📥 INGRESS_BINARY]: Chunk #${binaryChunkCount} received.`);
+      logger.debug({ candidateId, phase: 'INGEST', bytes: buffer.length, seq: binaryChunkCount }, `[📥 INGRESS_BINARY]: Chunk #${binaryChunkCount} received.`);
+      logger.debug({ candidateId, phase: 'INGEST', estMs: estimatedMs, totalBytes: state.totalBytesReceived }, `[📊 AUDIO_STATS]: Received ~${estimatedMs}ms of audio.`);
 
-      logger.debug({
-        candidateId,
-        phase: 'INGEST',
-        estMs: estimatedMs,
-        totalBytes: state.totalBytesReceived
-      }, `[📊 AUDIO_STATS]: Received ~${estimatedMs}ms of audio. Total: ${state.totalBytesReceived} bytes.`);
-
-      // TODO: [PHASE 1 - THE EAR]
-      // Pipe raw buffer to Sarvam Saaras STT WebSocket here.
-      // saarasSocket.send(buffer);
-
+      // TODO: Pipe to Sarvam STT
     } else {
-      // TEXT PATH: Testing/Probe Path
-      const text = data.toString();
+      /** [📥 USER_SAID]: Text Ingress & Orchestration */
+      let text = '';
+      try {
+        const payload = JSON.parse(data.toString());
+        text = payload.content || '';
+      } catch (err) {
+        logger.warn({ candidateId, phase: 'INGEST', err }, 'Failed to parse text ingress JSON');
+        return;
+      }
+
+      if (!text) return;
       logger.debug({ candidateId, phase: 'INGEST' }, `[📥 USER_SAID]: ${candidateId} -> ${text}`);
 
+      // BARGE-IN: Kill current stream and reset the valve
       if (state.isLLMGenerating) {
         logger.warn({ candidateId, phase: 'BARGE_IN' }, `[🛑 STOP_AI]: Interrupted by ${candidateId}. Aborting current reply.`);
         state.abortController.abort();
         state.abortController = new AbortController();
       }
 
+      // [ATOMIC TRAFFIC LIGHT FIX]
+      // Capture the current signal to prevent late-finishing aborted streams from turning off the active light.
+      const currentSignal = state.abortController.signal;
       state.isLLMGenerating = true;
 
       try {
-        const brainStream = streamGeminiResponse(text, candidateId, state.abortController.signal);
+        const brainStream = streamGeminiResponse(text, candidateId, currentSignal);
 
         for await (const sentence of brainStream) {
-          ws.send(JSON.stringify({ type: 'text', content: sentence }));
+          // [SOCKET SAFETY GUARD]: Prevent Node.js crash on dropped socket
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'text', content: sentence }));
+          }
         }
       } catch (err) {
-        // Logged in pipeline
+        // Traced in pipeline
       } finally {
-        state.isLLMGenerating = false;
+        // Only turn off the light if we are the current active stream
+        if (state.abortController.signal === currentSignal) {
+          state.isLLMGenerating = false;
+        }
       }
     }
   };
