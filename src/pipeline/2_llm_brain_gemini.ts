@@ -12,6 +12,7 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:streamGenerateContent?alt=sse&key=${GEMINI_API_KEY}`;
 
 /**
+ * INTENT: Execute a streaming inference call to Gemini and yield text in semantic sentence chunks./**
  * INTENT: Execute a streaming inference call to Gemini and yield text in semantic sentence chunks.
  * 
  * LOGIC:
@@ -28,6 +29,8 @@ export async function* streamGeminiResponse(
   let sentenceBuffer = '';
 
   try {
+    logger.debug({ candidateId, phase: 'REASONING' }, `[⚡ BRAIN_INIT]: Calling Gemini 1.5 Flash for prompt: "${prompt.substring(0, 20)}..."`);
+
     const response = await fetch(GEMINI_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -38,7 +41,7 @@ export async function* streamGeminiResponse(
           temperature: 0.7,
         },
       }),
-      signal, // [BARGE-IN] Atomic kill-switch
+      signal,
     });
 
     if (!response.ok || !response.body) {
@@ -49,8 +52,6 @@ export async function* streamGeminiResponse(
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let partialLine = '';
-
-    logger.debug({ candidateId, phase: 'REASONING' }, 'Gemini stream connection established');
 
     while (true) {
       const { done, value } = await reader.read();
@@ -69,45 +70,39 @@ export async function* streamGeminiResponse(
           const token = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
 
           if (token) {
+            logger.debug({ candidateId, phase: 'REASONING' }, `[🌊 STREAM_RAW]: Received token: '${token.replace(/\n/g, '\\n')}'`);
+            
             sentenceBuffer += token;
+            logger.debug({ candidateId, phase: 'REASONING' }, `[🧩 BUFFERING]: Current Buffer: '${sentenceBuffer.trim()}'`);
 
             // [SENTENCE BOUNDARY DETECTION]
-            // We only yield when the AI completes a thought. This prevents 
-            // the TTS engine from stuttering on fragmented chunks.
             if (/[.!?\n]/.test(token)) {
               const cleanSentence = sentenceBuffer.trim();
               if (cleanSentence) {
-                logger.debug({ 
-                  candidateId, 
-                  phase: 'REASONING', 
-                  chunkSize: cleanSentence.length 
-                }, 'Yielding sentence chunk');
-                
+                logger.debug({ candidateId, phase: 'REASONING' }, `[📤 SENTENCE_FLUSH]: Sentence boundary found. Yielding: '${cleanSentence}'`);
                 yield cleanSentence;
               }
-              sentenceBuffer = ''; // Flush memory immediately
+              sentenceBuffer = ''; 
             }
           }
         } catch (e) {
-          // SSE streams often have trailing noise or [DONE] markers
           continue;
         }
       }
     }
 
-    // Final flush for any remaining text without a trailing punctuation
     if (sentenceBuffer.trim()) {
+      logger.debug({ candidateId, phase: 'REASONING' }, `[📤 SENTENCE_FLUSH]: Final stream flush: '${sentenceBuffer.trim()}'`);
       yield sentenceBuffer.trim();
     }
 
   } catch (err: any) {
     if (err.name === 'AbortError') {
-      logger.warn({ candidateId, phase: 'BARGE_IN' }, 'Gemini reasoning stream aborted mid-flight');
+      logger.warn({ candidateId, phase: 'BARGE_IN' }, `[🛑 ABORT]: Gemini reasoning stream killed mid-flight.`);
     } else {
       logger.error({ candidateId, phase: 'REASONING', err }, 'Gemini stream fatal error');
       throw err;
     }
-  } finally {
-    logger.info({ candidateId, phase: 'REASONING' }, 'Gemini Reasoning complete');
   }
 }
+

@@ -14,16 +14,20 @@ import logger from '../utils/logger.js';
  * overhead for high-concurrency audio pipelines.
  */
 
-const MAX_CHUNK_SIZE = 16 * 1024; // 16KB strict MTU limit for raw PCM chunks
+import { streamGeminiResponse } from '../pipeline/2_llm_brain_gemini.js';
 
 /**
- * createSession: Factory function for session primitive initialization.
+ * INTENT: Manage the lifecycle of a real-time voice session using functional closures.
  * 
- * CONCURRENCY MECHANICS:
- * Each session initializes an AbortController. This provides an atomic primitive to signal 
- * 'barge-in' events. When the user interrupts the AI, we signal the controller, which 
- * propagates through the STT -> LLM -> TTS pipeline to kill downstream micro-tasks instantly.
+ * LOGIC:
+ * 1. Initialize session state trapped in the connection closure.
+ * 2. Route incoming WebSocket frames (Binary for Audio, Text for Testing).
+ * 3. Orchestrate the AI Cascade (STT -> LLM -> TTS).
+ * 4. Ensure atomic teardown via AbortController on disconnect or barge-in.
  */
+
+const MAX_CHUNK_SIZE = 16 * 1024; // 16KB strict MTU limit
+
 const createSession = (candidateId: string): SessionState => ({
   candidateId,
   startTime: Date.now(),
@@ -35,11 +39,7 @@ const createSession = (candidateId: string): SessionState => ({
   abortController: new AbortController(),
 });
 
-/**
- * handleConnection: Functional entry point for WebSocket orchestration.
- */
 export const handleConnection = (ws: WebSocket, req: IncomingMessage) => {
-  // Extract candidateId via URL query params for session pinning.
   const url = new URL(req.url || '', `http://${req.headers.host}`);
   const candidateId = url.searchParams.get('candidateId');
 
@@ -49,41 +49,52 @@ export const handleConnection = (ws: WebSocket, req: IncomingMessage) => {
     return;
   }
 
-  // Initialize Closure State - Scoped strictly to this connection instance.
   const state = createSession(candidateId);
+  logger.info({ candidateId, phase: 'HANDSHAKE' }, 'Session closure established');
 
-  /**
-   * handleMessage: Ingests binary audio frames.
-   * 
-   * BYTE FLOW DYNAMICS:
-   * Audio buffers are ingested as raw Buffer objects. By validating chunk sizes at the door (16KB), 
-   * we prevent large-payload attacks from saturating the V8 heap. These buffers remain in-memory 
-   * and are piped directly to the STT inference engine via stream buffers, bypassing disk I/O 
-   * entirely to maintain sub-500ms processing latency.
-   */
-  const handleMessage = (data: Buffer, isBinary: boolean) => {
-    if (!isBinary) return;
+  const handleMessage = async (data: Buffer | string, isBinary: boolean) => {
+    // [📥 INGRESS]: Log raw message arrival
+    const messageType = isBinary ? 'binary' : 'text';
+    const contentPreview = isBinary ? `${(data as Buffer).length} bytes` : data.toString();
+    logger.debug({ candidateId, phase: 'INGEST' }, `[📥 INGRESS]: Received ${messageType} frame: ${contentPreview}`);
 
-    // Strict MTU enforcement: Prevents event-loop blocking by oversized buffer allocations.
-    if (data.length > MAX_CHUNK_SIZE) {
-      logger.warn({ 
-        candidateId, 
-        phase: 'INGEST', 
-        byteLength: data.length, 
-        limit: MAX_CHUNK_SIZE 
-      }, 'MTU Violation: Dropping oversized chunk');
-      ws.close(1009, 'Chunk size limit exceeded');
-      return;
+    if (isBinary) {
+      const buffer = data as Buffer;
+      if (buffer.length > MAX_CHUNK_SIZE) {
+        logger.warn({ candidateId, phase: 'INGEST', byteLength: buffer.length }, 'MTU Violation: Dropping oversized chunk');
+        ws.close(1009, 'Chunk size limit exceeded');
+        return;
+      }
+      state.totalBytesReceived += buffer.length;
+      state.lastChunkTimestamp = Date.now();
+      // TODO: Pipe to STT Pipeline
+    } else {
+      // TEXT-BASED TESTING PATH
+      const text = data.toString();
+      
+      // If AI is already generating, this is a BARGE-IN.
+      if (state.isLLMGenerating) {
+        logger.warn({ candidateId, phase: 'BARGE_IN' }, '[🛑 ABORT]: User interrupted. Killing current stream.');
+        state.abortController.abort();
+        state.abortController = new AbortController(); // Reset for next thought
+      }
+
+      state.isLLMGenerating = true;
+
+      try {
+        const geminiStream = streamGeminiResponse(text, candidateId, state.abortController.signal);
+
+        for await (const sentence of geminiStream) {
+          // Pipe sentence back to socket (or eventually to TTS)
+          logger.debug({ candidateId, phase: 'PLAYBACK' }, `[📤 SENTENCE_FLUSH]: Sending to Client: '${sentence}'`);
+          ws.send(JSON.stringify({ type: 'text', content: sentence }));
+        }
+      } catch (err) {
+        // Errors are handled inside the generator or here
+      } finally {
+        state.isLLMGenerating = false;
+      }
     }
-
-    // Atomic state updates within the closure bubble.
-    state.totalBytesReceived += data.length;
-    state.lastChunkTimestamp = Date.now();
-
-    // TEMPORAL FLOW:
-    // Audio chunks should be pushed to a TransformStream here for real-time STT.
-    // The event loop remains unblocked as STT processing happens in background micro-tasks.
-  };
 
   /**
    * handleClose: Graceful teardown and resource reclamation.
