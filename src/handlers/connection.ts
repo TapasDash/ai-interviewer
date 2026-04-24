@@ -44,8 +44,7 @@ export const handleConnection = (ws: WebSocket, req: IncomingMessage) => {
   const handleMessage = async (data: any, isBinary: boolean) => {
     if (isBinary) {
       /**
-       * [ARCHITECT PROTOCOL - FORENSIC INGESTION]
-       * We treat every binary chunk as a high-frequency temporal event.
+       * [ARCHITECT PROTOCOL - FORENSIC BINARY INGESTION]
        */
       const buffer = data as Buffer;
       binaryChunkCount++;
