@@ -3,12 +3,13 @@ import logger from '../utils/logger.js';
 
 /**
  * [ARCHITECT PROTOCOL - THE MULTIMODAL BRAIN]
- * Establishing a bi-directional WebSocket uplink to Gemini 2.5 Flash.
+ * Establishing a bi-directional WebSocket uplink to Gemini 2.0 Flash.
+ * VERSION: v1beta (Corrected)
  */
 
 const MODEL = "models/gemini-2.0-flash-exp";
 const HOST = "generativelanguage.googleapis.com";
-const URL = `wss://${HOST}/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${process.env.GEMINI_API_KEY}`;
+const URL = `wss://${HOST}/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${process.env.GEMINI_API_KEY}`;
 
 const SYSTEM_PROMPT = "You are Cerberus, a brutal Principal Engineer. Grill the candidate on system design and memory leaks. Max 2 punchy sentences.";
 
@@ -16,9 +17,9 @@ const SYSTEM_PROMPT = "You are Cerberus, a brutal Principal Engineer. Grill the 
  * initGeminiLive: Factory function for the Multimodal Live Pipeline.
  * 
  * LOGIC:
- * 1. Open WSS to the BidiGenerateContent endpoint.
- * 2. Transmit the 'setup' JSON frame immediately upon connection.
- * 3. Buffer AI tokens into sentences and yield via callbacks.
+ * 1. Open WSS to the BidiGenerateContent endpoint via v1beta.
+ * 2. Transmit the 'setup' frame using the established camelCase schema.
+ * 3. Handle binary audio (realtimeInput) and text turns (clientContent).
  */
 export const initGeminiLive = (
   candidateId: string,
