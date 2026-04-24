@@ -190,16 +190,19 @@
          * INTENT: Capture microphone input and transform it into a raw 16kHz Int16 PCM stream.
          * 
          * LOGIC:
-         * 1. Linear Scaling: browser Float32 (-1.0 to 1.0) is multiplied by 32767.
-         * 2. Clamping: We ensure values stay within the 16-bit range (-32768 to 32767).
-         * 3. Quantization: The result is stored in an Int16Array, dropping floating point precision.
+         * 1. Scaling: browser Float32 (-1.0 to 1.0) is multiplied by 32767 to map to Int16 space.
+         * 2. Clamping: We use Math.max/min to ensure samples don't exceed the 16-bit signed range.
+         * 3. Transmission: We send the raw ArrayBuffer without any JSON wrapper for extreme efficiency.
          */
         async function startMic() {
             try {
+                // Initialize AudioContext at exactly 16000Hz (Cerberus Target)
                 audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
                 micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 
                 const source = audioContext.createMediaStreamSource(micStream);
+                
+                // Use ScriptProcessor with a 4096 buffer size
                 processor = audioContext.createScriptProcessor(4096, 1, 1);
 
                 source.connect(processor);
@@ -212,8 +215,8 @@
                     const int16Data = new Int16Array(float32Data.length);
 
                     for (let i = 0; i < float32Data.length; i++) {
-                        // Linear PCM conversion math: 
-                        // S = Math.max(-1, Math.min(1, float32Data[i])) * 0x7FFF
+                        // Linear PCM scaling math:
+                        // S = sample * 32767 (0x7FFF)
                         const s = Math.max(-1, Math.min(1, float32Data[i]));
                         int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
                     }
