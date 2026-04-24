@@ -8,7 +8,7 @@ import logger from '../utils/logger.js';
  */
 
 /**
- * INTENT: Stream raw AI tokens and yield semantic sentence units.
+ * INTENT: Stream raw AI tokens and yield semantic sentence units with human-readable logs.
  * 
  * LOGIC:
  * 1. Establish an SSE connection to Gemini using native fetch and an AbortSignal.
@@ -26,9 +26,8 @@ export async function* streamGeminiResponse(
   
   let sentenceBuffer = '';
 
-
   try {
-    logger.debug({ candidateId, phase: 'REASONING' }, `[⚡ BRAIN_INIT]: Calling Gemini 1.5 Flash...`);
+    logger.debug({ candidateId, phase: 'REASONING' }, `[🧠 AI_THINKING]: Processing prompt for ${candidateId}`);
 
     const response = await fetch(GEMINI_URL, {
       method: 'POST',
@@ -69,16 +68,14 @@ export async function* streamGeminiResponse(
           const token = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
 
           if (token) {
-            logger.debug({ candidateId, phase: 'REASONING' }, `[🌊 STREAM_RAW]: '${token.replace(/\n/g, '\\n')}'`);
-            
             sentenceBuffer += token;
-            logger.debug({ candidateId, phase: 'REASONING' }, `[🧩 BUFFERING]: '${sentenceBuffer.trim()}'`);
+            logger.debug({ candidateId, phase: 'REASONING' }, `[🌊 AI_BUFFER]: Current sentence progress: "${sentenceBuffer.trim()}"`);
 
             // [SENTENCE BOUNDARY DETECTION]
             if (/[.!?\n]/.test(token)) {
               const cleanSentence = sentenceBuffer.trim();
               if (cleanSentence) {
-                logger.debug({ candidateId, phase: 'REASONING' }, `[📤 SENTENCE_FLUSH]: '${cleanSentence}'`);
+                logger.debug({ candidateId, phase: 'REASONING' }, `[📤 AI_REPLYING]: Full sentence ready for ${candidateId}`);
                 yield cleanSentence;
               }
               sentenceBuffer = ''; 
@@ -90,15 +87,14 @@ export async function* streamGeminiResponse(
       }
     }
 
-    // Final flush for remaining tokens
     if (sentenceBuffer.trim()) {
-      logger.debug({ candidateId, phase: 'REASONING' }, `[📤 SENTENCE_FLUSH]: '${sentenceBuffer.trim()}'`);
+      logger.debug({ candidateId, phase: 'REASONING' }, `[📤 AI_REPLYING]: Final thought sent for ${candidateId}`);
       yield sentenceBuffer.trim();
     }
 
   } catch (err: any) {
     if (err.name === 'AbortError') {
-      logger.warn({ candidateId, phase: 'BARGE_IN' }, `[🛑 ABORT]: Gemini stream killed.`);
+      logger.warn({ candidateId, phase: 'BARGE_IN' }, `[🛑 STOP_AI]: Gemini stream killed for ${candidateId}`);
     } else {
       logger.error({ candidateId, phase: 'REASONING', err }, 'Gemini stream fatal error');
       throw err;
