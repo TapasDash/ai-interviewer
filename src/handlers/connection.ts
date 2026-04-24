@@ -31,9 +31,9 @@ const createSession = (candidateId: string): SessionState => ({
  * INTENT: Orchestrate binary and text streams for a single candidate session.
  * LOGIC:
  * 1. Initialize session closure.
- * 2. Handle [📥 INGRESS] for both raw audio (binary) and testing frames (text).
+ * 2. Handle [📥 USER_SAID] for both raw audio (binary) and testing frames (text).
  * 3. Link triggers to the Gemini Brain.
- * 4. Implement [🛑 ABORT] logic for instant barge-in handling.
+ * 4. Implement [🛑 STOP_AI] logic for instant barge-in handling.
  */
 export const handleConnection = (ws: WebSocket, req: IncomingMessage) => {
   const url = new URL(req.url || '', `http://${req.headers.host}`);
@@ -46,19 +46,13 @@ export const handleConnection = (ws: WebSocket, req: IncomingMessage) => {
   }
 
   const state = createSession(candidateId);
-  logger.info({ candidateId, phase: 'HANDSHAKE' }, 'Session closure established');
+  logger.info({ candidateId, phase: 'HANDSHAKE' }, `[👤 USER_JOINED]: Candidate ${candidateId} connected.`);
 
-  /**
-   * handleMessage: Ingests raw frames from the client.
-   */
   const handleMessage = async (data: any, isBinary: boolean) => {
-    const messageType = isBinary ? 'binary' : 'text';
-    const contentPreview = isBinary ? `${data.length} bytes` : data.toString();
-    
-    logger.debug({ candidateId, phase: 'INGEST' }, `[📥 INGRESS]: ${messageType} (${contentPreview})`);
+    const content = isBinary ? `${data.length} bytes of audio` : data.toString();
+    logger.debug({ candidateId, phase: 'INGEST' }, `[📥 USER_SAID]: ${candidateId} -> ${content}`);
 
     if (isBinary) {
-      // BINARY PATH: Audio Ingestion
       if (data.length > MAX_CHUNK_SIZE) {
         logger.warn({ candidateId, phase: 'INGEST', bytes: data.length }, 'MTU Violation: Killing session');
         ws.close(1009, 'Chunk size limit exceeded');
@@ -73,9 +67,9 @@ export const handleConnection = (ws: WebSocket, req: IncomingMessage) => {
 
       // [BARGE-IN HANDLING]
       if (state.isLLMGenerating) {
-        logger.warn({ candidateId, phase: 'BARGE_IN' }, '[🛑 ABORT]: Human interrupted. Killing stream.');
+        logger.warn({ candidateId, phase: 'BARGE_IN' }, `[🛑 STOP_AI]: Interrupted by ${candidateId}. Aborting current reply.`);
         state.abortController.abort();
-        state.abortController = new AbortController(); // Reset valve
+        state.abortController = new AbortController();
       }
 
       state.isLLMGenerating = true;
@@ -84,40 +78,34 @@ export const handleConnection = (ws: WebSocket, req: IncomingMessage) => {
         const brainStream = streamGeminiResponse(text, candidateId, state.abortController.signal);
 
         for await (const sentence of brainStream) {
-          logger.debug({ candidateId, phase: 'PLAYBACK' }, `[📤 SENTENCE_FLUSH]: '${sentence}'`);
           ws.send(JSON.stringify({ type: 'text', content: sentence }));
         }
       } catch (err) {
-        // Errors are already traced in the pipeline
+        // Logged in pipeline
       } finally {
         state.isLLMGenerating = false;
       }
     }
   };
 
-  /**
-   * handleClose: Cleans up the manifold and reclaims memory.
-   */
   const handleClose = () => {
     if (!state.isActive) return;
     state.isActive = false;
     
     state.abortController.abort(); // Kill all pending AI tasks
 
-    // Phase 6: Detached Evaluation
     (async () => {
       try {
-        logger.info({ candidateId, phase: 'TEARDOWN' }, 'Starting scorecard evaluation...');
+        logger.info({ candidateId, phase: 'TEARDOWN' }, `[💾 SAVING_WORK]: Closing session for ${candidateId}.`);
         // Mocking performEvaluation for stability
         await Promise.resolve();
-        logger.info({ candidateId, phase: 'TEARDOWN' }, 'Scorecard persisted. Closure released.');
+        logger.info({ candidateId, phase: 'TEARDOWN' }, `[✅ DONE]: Cleanup complete for ${candidateId}. Memory released.`);
       } catch (err) {
         logger.error({ candidateId, phase: 'TEARDOWN', err }, 'Teardown failure');
       }
     })();
   };
 
-  // Event wiring
   ws.on('message', (data, isBinary) => handleMessage(data, isBinary));
   ws.on('close', handleClose);
   ws.on('error', (err) => {
