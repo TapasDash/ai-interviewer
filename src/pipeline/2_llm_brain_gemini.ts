@@ -1,103 +1,106 @@
+import { WebSocket } from 'ws';
 import logger from '../utils/logger.js';
 
 /**
- * [ARCHITECT PROTOCOL - THE BRAIN]
- * We utilize Gemini 1.5 Flash via native SSE to minimize TTFAB (Time to First Audio Byte).
- * Memory Physics: All state is local to the generator execution context. 
- * Once the generator settles, the closure is released for instant V8 reclamation.
+ * [ARCHITECT PROTOCOL - THE MULTIMODAL BRAIN]
+ * Establishing a bi-directional WebSocket uplink to Gemini 2.5 Flash.
  */
+
+const MODEL = "models/gemini-2.5-flash";
+const HOST = "generativelanguage.googleapis.com";
+const URL = `wss://${HOST}/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${process.env.GEMINI_API_KEY}`;
+
+const SYSTEM_PROMPT = "You are Cerberus, a brutal Principal Engineer. Grill the candidate on system design and memory leaks. Max 2 punchy sentences.";
 
 /**
- * INTENT: Stream raw AI tokens and yield semantic sentence units with human-readable logs.
+ * initGeminiLive: Factory function for the Multimodal Live Pipeline.
  * 
  * LOGIC:
- * 1. Establish an SSE connection to Gemini using native fetch and an AbortSignal.
- * 2. Parse the stream line-by-line to extract tokenized text payloads.
- * 3. Buffer characters until a terminal boundary (., !, ?, \n) is detected.
- * 4. Yield the clean sentence and flush the buffer to prevent memory leaks.
+ * 1. Open WSS to the BidiGenerateContent endpoint.
+ * 2. Transmit the 'setup' JSON frame immediately upon connection.
+ * 3. Buffer AI tokens into sentences and yield via callbacks.
  */
-export async function* streamGeminiResponse(
-  prompt: string,
+export const initGeminiLive = (
   candidateId: string,
-  signal: AbortSignal
-): AsyncGenerator<string> {
-  const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-  const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key=${GEMINI_API_KEY}`;
-  
+  onReply: (text: string) => void,
+  onTranscript?: (text: string) => void
+) => {
+  const ws = new WebSocket(URL);
   let sentenceBuffer = '';
 
-  try {
-    logger.debug({ candidateId, phase: 'REASONING' }, `[🧠 AI_THINKING]: Processing prompt for ${candidateId}`);
-
-    const response = await fetch(GEMINI_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: {
-          maxOutputTokens: 1024,
-          temperature: 0.7,
-        },
-      }),
-      signal,
-    });
-
-    if (!response.ok || !response.body) {
-      const errorText = await response.text();
-      throw new Error(`Gemini API Error: ${response.status} - ${errorText}`);
+  const send = (payload: object) => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(payload));
     }
+  };
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let partialLine = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      const chunk = decoder.decode(value, { stream: true });
-      const lines = (partialLine + chunk).split('\n');
-      partialLine = lines.pop() || '';
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-
-        try {
-          const jsonStr = line.replace('data: ', '');
-          const data = JSON.parse(jsonStr);
-          const token = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-
-          if (token) {
-            sentenceBuffer += token;
-            logger.debug({ candidateId, phase: 'REASONING' }, `[🌊 AI_BUFFER]: Current sentence progress: "${sentenceBuffer.trim()}"`);
-
-            // [SENTENCE BOUNDARY DETECTION]
-            if (/[.!?\n]/.test(token)) {
-              const cleanSentence = sentenceBuffer.trim();
-              if (cleanSentence) {
-                logger.debug({ candidateId, phase: 'REASONING' }, `[📤 AI_REPLYING]: Full sentence ready for ${candidateId}`);
-                yield cleanSentence;
-              }
-              sentenceBuffer = ''; 
-            }
-          }
-        } catch (e) {
-          continue;
+  ws.on('open', () => {
+    logger.info({ candidateId, phase: 'REASONING' }, `[🧬 LIVE_UPLINK]: Handshake established with Gemini 2.5 Flash.`);
+    
+    // THE SETUP FRAME
+    send({
+      setup: {
+        model: MODEL,
+        generation_config: { response_modalities: ["TEXT"] },
+        system_instruction: {
+          parts: [{ text: SYSTEM_PROMPT }]
         }
       }
-    }
+    });
+  });
 
-    if (sentenceBuffer.trim()) {
-      logger.debug({ candidateId, phase: 'REASONING' }, `[📤 AI_REPLYING]: Final thought sent for ${candidateId}`);
-      yield sentenceBuffer.trim();
-    }
+  ws.on('message', (data) => {
+    try {
+      const response = JSON.parse(data.toString());
 
-  } catch (err: any) {
-    if (err.name === 'AbortError') {
-      logger.warn({ candidateId, phase: 'BARGE_IN' }, `[🛑 STOP_AI]: Gemini stream killed for ${candidateId}`);
-    } else {
-      logger.error({ candidateId, phase: 'REASONING', err }, 'Gemini stream fatal error');
-      throw err;
+      // [📤 AI_REPLYING]: Parsing response tokens
+      if (response.serverContent?.modelTurn?.parts) {
+        const parts = response.serverContent.modelTurn.parts;
+        const token = parts[0]?.text || '';
+
+        if (token) {
+          sentenceBuffer += token;
+          if (/[.!?\n]/.test(token)) {
+            const cleanSentence = sentenceBuffer.trim();
+            if (cleanSentence) {
+              logger.debug({ candidateId, phase: 'REASONING' }, `[📤 AI_REPLYING]: ${cleanSentence}`);
+              onReply(cleanSentence);
+            }
+            sentenceBuffer = '';
+          }
+        }
+      }
+
+      // [📝 STT_FINAL]: Parsing user transcription
+      if (response.serverContent?.interimResults?.[0]?.alternatives?.[0]?.transcript) {
+        const transcript = response.serverContent.interimResults[0].alternatives[0].transcript;
+        if (onTranscript) {
+          logger.info({ candidateId, phase: 'STT' }, `[📝 STT_FINAL]: "${transcript}"`);
+          onTranscript(transcript);
+        }
+      }
+
+    } catch (err) {
+      logger.error({ candidateId, phase: 'REASONING', err }, 'Failed to parse Gemini message');
     }
-  }
-}
+  });
+
+  ws.on('error', (err) => {
+    logger.error({ candidateId, phase: 'REASONING', err }, 'Gemini Live WebSocket error');
+  });
+
+  return {
+    sendAudio: (buffer: Buffer) => {
+      logger.debug({ candidateId, phase: 'INGEST', bytes: buffer.length }, `[🌊 AUDIO_IN]: ${buffer.length} bytes -> Brain.`);
+      send({
+        realtime_input: {
+          media_chunks: [{
+            mime_type: "audio/pcm;rate=16000",
+            data: buffer.toString('base64')
+          }]
+        }
+      });
+    },
+    close: () => ws.close()
+  };
+};

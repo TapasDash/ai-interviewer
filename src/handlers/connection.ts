@@ -2,15 +2,14 @@ import { WebSocket } from 'ws';
 import { IncomingMessage } from 'http';
 import { SessionState } from '../types/session.js';
 import logger from '../utils/logger.js';
-import { streamGeminiResponse } from '../pipeline/2_llm_brain_gemini.js';
+import { initGeminiLive } from '../pipeline/2_llm_brain_gemini.js';
 
 /**
  * [ARCHITECT PROTOCOL - THE CONNECTION MANIFOLD]
- * Pure functional orchestrator for the AI interview lifecycle.
+ * Pure functional orchestrator for the Cerberus Live Pipeline.
  */
 
 const MAX_CHUNK_SIZE = 16 * 1024; // 16KB strict MTU limit
-const BYTES_PER_MS = 32; // 16000Hz * 2 bytes (Int16) / 1000ms
 
 const createSession = (candidateId: string): SessionState => ({
   candidateId,
@@ -23,9 +22,6 @@ const createSession = (candidateId: string): SessionState => ({
   abortController: new AbortController(),
 });
 
-/**
- * INTENT: Orchestrate binary and text streams for a single candidate session.
- */
 export const handleConnection = (ws: WebSocket, req: IncomingMessage) => {
   const url = new URL(req.url || '', `http://${req.headers.host}`);
   const candidateId = url.searchParams.get('candidateId');
@@ -37,79 +33,65 @@ export const handleConnection = (ws: WebSocket, req: IncomingMessage) => {
   }
 
   const state = createSession(candidateId);
-  let binaryChunkCount = 0; 
+  
+  /**
+   * [🧬 GEMINI LIVE INITIALIZATION]
+   * Establishes the bi-directional pipe immediately.
+   */
+  const gemini = initGeminiLive(
+    candidateId,
+    (sentence) => {
+      // AI Reply Logic: Guarded against dropped sockets
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'text', content: sentence }));
+      }
+    },
+    (transcript) => {
+      // User Transcript Logic
+      // This is primarily for forensic logging in Phase 2
+    }
+  );
 
   logger.info({ candidateId, phase: 'HANDSHAKE' }, `[👤 USER_JOINED]: Candidate ${candidateId} connected.`);
 
   const handleMessage = async (data: any, isBinary: boolean) => {
     if (isBinary) {
-      /** [📥 INGRESS_BINARY]: Raw PCM Capture */
-      const buffer = data as Buffer;
-      binaryChunkCount++;
-
-      if (buffer.length > MAX_CHUNK_SIZE) {
-        logger.warn({ candidateId, phase: 'INGEST', bytes: buffer.length }, `[⚠️ MEM_VIOLATION]: Dropping chunk #${binaryChunkCount}. Size exceeds 16KB.`);
+      /** [📥 INGRESS_BINARY]: Direct Piping to Gemini Live */
+      if (data.length > MAX_CHUNK_SIZE) {
+        logger.warn({ candidateId, phase: 'INGEST', bytes: data.length }, `[⚠️ MEM_VIOLATION]: Dropping chunk.`);
         return;
       }
 
-      const estimatedMs = Math.round(buffer.length / BYTES_PER_MS);
-      state.totalBytesReceived += buffer.length;
+      state.totalBytesReceived += data.length;
       state.lastChunkTimestamp = Date.now();
 
-      logger.debug({ candidateId, phase: 'INGEST', bytes: buffer.length, seq: binaryChunkCount }, `[📥 INGRESS_BINARY]: Chunk #${binaryChunkCount} received.`);
-      logger.debug({ candidateId, phase: 'INGEST', estMs: estimatedMs, totalBytes: state.totalBytesReceived }, `[📊 AUDIO_STATS]: Received ~${estimatedMs}ms of audio.`);
+      // [🌊 AUDIO_IN]: Stream to Brain
+      gemini.sendAudio(data);
 
-      // TODO: Pipe to Sarvam STT
     } else {
-      /** [📥 USER_SAID]: Text Ingress & Orchestration */
+      /** [📥 USER_SAID]: Text Probe Path */
       let text = '';
       try {
         const payload = JSON.parse(data.toString());
         text = payload.content || '';
       } catch (err) {
-        logger.warn({ candidateId, phase: 'INGEST', err }, 'Failed to parse text ingress JSON');
+        logger.warn({ candidateId, phase: 'INGEST', err }, 'Malformed JSON ingress');
         return;
       }
 
       if (!text) return;
       logger.debug({ candidateId, phase: 'INGEST' }, `[📥 USER_SAID]: ${candidateId} -> ${text}`);
-
-      // BARGE-IN: Kill current stream and reset the valve
-      if (state.isLLMGenerating) {
-        logger.warn({ candidateId, phase: 'BARGE_IN' }, `[🛑 STOP_AI]: Interrupted by ${candidateId}. Aborting current reply.`);
-        state.abortController.abort();
-        state.abortController = new AbortController();
-      }
-
-      // [ATOMIC TRAFFIC LIGHT FIX]
-      // Capture the current signal to prevent late-finishing aborted streams from turning off the active light.
-      const currentSignal = state.abortController.signal;
-      state.isLLMGenerating = true;
-
-      try {
-        const brainStream = streamGeminiResponse(text, candidateId, currentSignal);
-
-        for await (const sentence of brainStream) {
-          // [SOCKET SAFETY GUARD]: Prevent Node.js crash on dropped socket
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'text', content: sentence }));
-          }
-        }
-      } catch (err) {
-        // Traced in pipeline
-      } finally {
-        // Only turn off the light if we are the current active stream
-        if (state.abortController.signal === currentSignal) {
-          state.isLLMGenerating = false;
-        }
-      }
+      
+      // Text-based prompting for Gemini Live can be added here if needed
     }
   };
 
   const handleClose = () => {
     if (!state.isActive) return;
     state.isActive = false;
+    
     state.abortController.abort(); 
+    gemini.close(); // Sever the AI link
 
     (async () => {
       try {
