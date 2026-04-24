@@ -6,9 +6,9 @@ import logger from '../utils/logger.js';
  * Establishing a bi-directional WebSocket uplink to Gemini 2.5 Flash.
  */
 
-const MODEL = "models/gemini-2.5-flash";
+const MODEL = "models/gemini-2.0-flash-exp";
 const HOST = "generativelanguage.googleapis.com";
-const URL = `wss://${HOST}/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${process.env.GEMINI_API_KEY}`;
+const URL = `wss://${HOST}/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${process.env.GEMINI_API_KEY}`;
 
 const SYSTEM_PROMPT = "You are Cerberus, a brutal Principal Engineer. Grill the candidate on system design and memory leaks. Max 2 punchy sentences.";
 
@@ -35,14 +35,14 @@ export const initGeminiLive = (
   };
 
   ws.on('open', () => {
-    logger.info({ candidateId, phase: 'REASONING' }, `[🧬 LIVE_UPLINK]: Handshake established with Gemini 2.5 Flash.`);
+    logger.info({ candidateId, phase: 'REASONING' }, `[🧬 LIVE_UPLINK]: Handshake established with Gemini 2.0 Flash Exp.`);
     
     // THE SETUP FRAME
     send({
       setup: {
         model: MODEL,
-        generation_config: { response_modalities: ["TEXT"] },
-        system_instruction: {
+        generationConfig: { responseModalities: ["TEXT"] },
+        systemInstruction: {
           parts: [{ text: SYSTEM_PROMPT }]
         }
       }
@@ -93,11 +93,19 @@ export const initGeminiLive = (
     sendAudio: (buffer: Buffer) => {
       logger.debug({ candidateId, phase: 'INGEST', bytes: buffer.length }, `[🌊 AUDIO_IN]: ${buffer.length} bytes -> Brain.`);
       send({
-        realtime_input: {
-          media_chunks: [{
-            mime_type: "audio/pcm;rate=16000",
+        realtimeInput: {
+          mediaChunks: [{
+            mimeType: "audio/pcm;rate=16000",
             data: buffer.toString('base64')
           }]
+        }
+      });
+    },
+    sendText: (text: string) => {
+      send({
+        clientContent: {
+          turns: [{ role: "user", parts: [{ text }] }],
+          turnComplete: true
         }
       });
     },

@@ -82,7 +82,8 @@ export const handleConnection = (ws: WebSocket, req: IncomingMessage) => {
       if (!text) return;
       logger.debug({ candidateId, phase: 'INGEST' }, `[📥 USER_SAID]: ${candidateId} -> ${text}`);
       
-      // Text-based prompting for Gemini Live can be added here if needed
+      // Wire up text input directly to the Gemini LLM Brain
+      gemini.sendText(text);
     }
   };
 
