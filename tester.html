@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CERBERUS PROBE v1.0</title>
+    <title>CERBERUS PROBE v1.1 - ELITE EAR</title>
     <style>
         :root {
             --bg: #0f172a;
@@ -12,6 +12,7 @@
             --text: #f8fafc;
             --error: #f43f5e;
             --success: #10b981;
+            --warning: #fbbf24;
         }
 
         body {
@@ -70,6 +71,7 @@
         .log-in { border-left-color: var(--accent); color: var(--accent); }
         .log-out { border-left-color: var(--success); color: var(--success); }
         .log-sys { border-left-color: #64748b; color: #94a3b8; }
+        .log-mic { border-left-color: var(--warning); color: var(--warning); }
 
         .timestamp {
             color: #475569;
@@ -78,6 +80,12 @@
         }
 
         .controls {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .row {
             display: flex;
             gap: 10px;
         }
@@ -93,49 +101,53 @@
             font-family: inherit;
         }
 
-        input:focus {
-            border-color: var(--accent);
-        }
-
         button {
-            background: var(--accent);
-            color: var(--bg);
             border: none;
-            padding: 0 24px;
+            padding: 12px 24px;
             border-radius: 4px;
             font-weight: bold;
             cursor: pointer;
-            transition: opacity 0.2s;
+            transition: all 0.2s;
+            font-family: inherit;
+            text-transform: uppercase;
         }
 
-        button:hover {
-            opacity: 0.8;
-        }
+        .btn-send { background: var(--accent); color: var(--bg); }
+        .btn-mic-start { background: var(--warning); color: var(--bg); }
+        .btn-mic-stop { background: var(--error); color: var(--text); }
 
-        button:disabled {
-            background: #475569;
-            cursor: not-allowed;
-        }
+        button:hover { opacity: 0.8; transform: translateY(-1px); }
+        button:disabled { background: #475569; cursor: not-allowed; transform: none; }
     </style>
 </head>
 <body>
     <header>
         <div style="font-size: 20px; font-weight: bold; letter-spacing: 2px;">
-            PROJECT <span style="color: var(--accent)">CERBERUS</span> PROBE
+            PROJECT <span style="color: var(--accent)">CERBERUS</span> PROBE v1.1
         </div>
         <div id="status" class="status-pill status-connecting">Disconnected</div>
     </header>
 
     <div id="terminal">
         <div class="log-entry log-sys">
-            <span class="timestamp">[SYS]</span> Initializing Forensic Uplink...
+            <span class="timestamp">[SYS]</span> Cerberus Forensics initialized. Waiting for uplink...
         </div>
     </div>
 
-    <form class="controls" id="probe-form">
-        <input type="text" id="probe-input" placeholder="Type text to probe Gemini Brain..." autocomplete="off">
-        <button type="submit" id="probe-send">SEND</button>
-    </form>
+    <div class="controls">
+        <div class="row">
+            <button id="mic-start" class="btn-mic-start">Start Mic</button>
+            <button id="mic-stop" class="btn-mic-stop" disabled>Stop Mic</button>
+            <div style="flex-grow: 1"></div>
+            <div id="mic-indicator" style="color: var(--warning); font-size: 12px; display: none; align-self: center;">
+                ● STREAMING 16KHZ PCM...
+            </div>
+        </div>
+        <form class="row" id="probe-form">
+            <input type="text" id="probe-input" placeholder="Probe Gemini via text..." autocomplete="off">
+            <button type="submit" id="probe-send" class="btn-send">Send</button>
+        </form>
+    </div>
 
     <script>
         const terminal = document.getElementById('terminal');
@@ -143,20 +155,25 @@
         const form = document.getElementById('probe-form');
         const input = document.getElementById('probe-input');
         const sendBtn = document.getElementById('probe-send');
+        
+        const micStartBtn = document.getElementById('mic-start');
+        const micStopBtn = document.getElementById('mic-stop');
+        const micIndicator = document.getElementById('mic-indicator');
 
-        // Config: Change candidateId if needed
+        // Config
         const CANDIDATE_ID = 'tester_forensic_001';
         const WS_URL = `ws://localhost:8080?candidateId=${CANDIDATE_ID}`;
 
         let ws = null;
+        let audioContext = null;
+        let micStream = null;
+        let processor = null;
 
         function log(msg, type = 'sys') {
             const entry = document.createElement('div');
             entry.className = `log-entry log-${type}`;
-            
             const time = new Date().toLocaleTimeString('en-US', { hour12: false, fractionDigits: 3 });
             entry.innerHTML = `<span class="timestamp">[${time}]</span> ${msg}`;
-            
             terminal.appendChild(entry);
             terminal.scrollTop = terminal.scrollHeight;
         }
@@ -165,13 +182,73 @@
             statusPill.textContent = state;
             statusPill.className = `status-pill status-${state.toLowerCase()}`;
             sendBtn.disabled = state !== 'OPEN';
+            micStartBtn.disabled = state !== 'OPEN';
+        }
+
+        /**
+         * [ELITE EAR LOGIC]
+         * INTENT: Capture microphone input and transform it into a raw 16kHz Int16 PCM stream.
+         * 
+         * LOGIC:
+         * 1. Linear Scaling: browser Float32 (-1.0 to 1.0) is multiplied by 32767.
+         * 2. Clamping: We ensure values stay within the 16-bit range (-32768 to 32767).
+         * 3. Quantization: The result is stored in an Int16Array, dropping floating point precision.
+         */
+        async function startMic() {
+            try {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+                micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                
+                const source = audioContext.createMediaStreamSource(micStream);
+                processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+
+                processor.onaudioprocess = (e) => {
+                    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+                    const float32Data = e.inputBuffer.getChannelData(0);
+                    const int16Data = new Int16Array(float32Data.length);
+
+                    for (let i = 0; i < float32Data.length; i++) {
+                        // Linear PCM conversion math: 
+                        // S = Math.max(-1, Math.min(1, float32Data[i])) * 0x7FFF
+                        const s = Math.max(-1, Math.min(1, float32Data[i]));
+                        int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                    }
+
+                    // Flush raw binary buffer down the socket
+                    ws.send(int16Data.buffer);
+                };
+
+                micStartBtn.disabled = true;
+                micStopBtn.disabled = false;
+                micIndicator.style.display = 'block';
+                log('ELITE_EAR: 16kHz PCM Stream started.', 'mic');
+
+            } catch (err) {
+                log(`MIC_ERROR: ${err.message}`, 'sys');
+            }
+        }
+
+        function stopMic() {
+            if (processor) processor.disconnect();
+            if (micStream) micStream.getTracks().forEach(t => t.stop());
+            if (audioContext) audioContext.close();
+            
+            micStartBtn.disabled = false;
+            micStopBtn.disabled = true;
+            micIndicator.style.display = 'none';
+            log('ELITE_EAR: Stream terminated.', 'mic');
         }
 
         function connect() {
-            log(`Attempting connection to ${WS_URL}...`, 'sys');
+            log(`Opening uplink to ${WS_URL}...`, 'sys');
             updateStatus('CONNECTING');
 
             ws = new WebSocket(WS_URL);
+            ws.binaryType = 'arraybuffer'; // Crucial for raw binary frames
 
             ws.onopen = () => {
                 log('Forensic Uplink Established.', 'sys');
@@ -181,21 +258,17 @@
             ws.onmessage = (event) => {
                 try {
                     const data = JSON.parse(event.data);
-                    log(`RECEIVED: ${data.content}`, 'in');
+                    log(`AI_REPLY: ${data.content}`, 'in');
                 } catch (e) {
-                    log(`RAW_RECV: ${event.data}`, 'in');
+                    log(`RAW_RECV: ${event.data.byteLength || event.data.length} bytes`, 'in');
                 }
             };
 
             ws.onclose = () => {
-                log('Connection severed by remote host.', 'sys');
+                log('Uplink severed.', 'sys');
                 updateStatus('CLOSED');
-                // Auto-reconnect after 3 seconds
+                stopMic();
                 setTimeout(connect, 3000);
-            };
-
-            ws.onerror = (err) => {
-                log(`UPLINK_ERROR: Terminal failure detected.`, 'sys');
             };
         }
 
@@ -203,12 +276,13 @@
             e.preventDefault();
             const val = input.value.trim();
             if (!val || !ws || ws.readyState !== WebSocket.OPEN) return;
-
-            const packet = { type: 'text', content: val };
-            ws.send(JSON.stringify(packet));
-            log(`SENT: ${val}`, 'out');
+            ws.send(JSON.stringify({ type: 'text', content: val }));
+            log(`USER_TEXT: ${val}`, 'out');
             input.value = '';
         };
+
+        micStartBtn.onclick = startMic;
+        micStopBtn.onclick = stopMic;
 
         // Initialize
         connect();
