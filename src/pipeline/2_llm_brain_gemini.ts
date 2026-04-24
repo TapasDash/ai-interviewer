@@ -1,35 +1,34 @@
 import logger from '../utils/logger.js';
 
 /**
- * [ARCHITECT PROTOCOL - LLM BRAIN]
- * We utilize Gemini 1.5 Flash for its sub-second TBT (Time Between Tokens).
- * By using native fetch + SSE, we eliminate the 15MB overhead of the Google SDK.
- * The sentence-boundary buffer is the only 'hoarding' allowed, required to
- * provide semantic stability for the downstream TTS mouth.
+ * [ARCHITECT PROTOCOL - THE BRAIN]
+ * We utilize Gemini 1.5 Flash via native SSE to minimize TTFAB (Time to First Audio Byte).
+ * Memory Physics: All state is local to the generator execution context. 
+ * Once the generator settles, the closure is released for instant V8 reclamation.
  */
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:streamGenerateContent?alt=sse&key=${GEMINI_API_KEY}`;
-
 /**
- * INTENT: Execute a streaming inference call to Gemini and yield text in semantic sentence chunks./**
- * INTENT: Execute a streaming inference call to Gemini and yield text in semantic sentence chunks.
+ * INTENT: Stream raw AI tokens and yield semantic sentence units.
  * 
  * LOGIC:
- * 1. Initialize native fetch with AbortSignal for instant barge-in teardown.
- * 2. Process the ReadableStream line-by-line to extract SSE 'data:' payloads.
- * 3. Buffer text tokens until a sentence boundary (., !, ?, \n) is detected.
- * 4. Yield the sentence chunk and flush the buffer to maintain memory safety.
+ * 1. Establish an SSE connection to Gemini using native fetch and an AbortSignal.
+ * 2. Parse the stream line-by-line to extract tokenized text payloads.
+ * 3. Buffer characters until a terminal boundary (., !, ?, \n) is detected.
+ * 4. Yield the clean sentence and flush the buffer to prevent memory leaks.
  */
 export async function* streamGeminiResponse(
   prompt: string,
   candidateId: string,
   signal: AbortSignal
 ): AsyncGenerator<string> {
+  const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+  const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key=${GEMINI_API_KEY}`;
+  
   let sentenceBuffer = '';
 
+
   try {
-    logger.debug({ candidateId, phase: 'REASONING' }, `[⚡ BRAIN_INIT]: Calling Gemini 1.5 Flash for prompt: "${prompt.substring(0, 20)}..."`);
+    logger.debug({ candidateId, phase: 'REASONING' }, `[⚡ BRAIN_INIT]: Calling Gemini 1.5 Flash...`);
 
     const response = await fetch(GEMINI_URL, {
       method: 'POST',
@@ -37,7 +36,7 @@ export async function* streamGeminiResponse(
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: {
-          maxOutputTokens: 1000,
+          maxOutputTokens: 1024,
           temperature: 0.7,
         },
       }),
@@ -70,16 +69,16 @@ export async function* streamGeminiResponse(
           const token = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
 
           if (token) {
-            logger.debug({ candidateId, phase: 'REASONING' }, `[🌊 STREAM_RAW]: Received token: '${token.replace(/\n/g, '\\n')}'`);
+            logger.debug({ candidateId, phase: 'REASONING' }, `[🌊 STREAM_RAW]: '${token.replace(/\n/g, '\\n')}'`);
             
             sentenceBuffer += token;
-            logger.debug({ candidateId, phase: 'REASONING' }, `[🧩 BUFFERING]: Current Buffer: '${sentenceBuffer.trim()}'`);
+            logger.debug({ candidateId, phase: 'REASONING' }, `[🧩 BUFFERING]: '${sentenceBuffer.trim()}'`);
 
             // [SENTENCE BOUNDARY DETECTION]
             if (/[.!?\n]/.test(token)) {
               const cleanSentence = sentenceBuffer.trim();
               if (cleanSentence) {
-                logger.debug({ candidateId, phase: 'REASONING' }, `[📤 SENTENCE_FLUSH]: Sentence boundary found. Yielding: '${cleanSentence}'`);
+                logger.debug({ candidateId, phase: 'REASONING' }, `[📤 SENTENCE_FLUSH]: '${cleanSentence}'`);
                 yield cleanSentence;
               }
               sentenceBuffer = ''; 
@@ -91,18 +90,18 @@ export async function* streamGeminiResponse(
       }
     }
 
+    // Final flush for remaining tokens
     if (sentenceBuffer.trim()) {
-      logger.debug({ candidateId, phase: 'REASONING' }, `[📤 SENTENCE_FLUSH]: Final stream flush: '${sentenceBuffer.trim()}'`);
+      logger.debug({ candidateId, phase: 'REASONING' }, `[📤 SENTENCE_FLUSH]: '${sentenceBuffer.trim()}'`);
       yield sentenceBuffer.trim();
     }
 
   } catch (err: any) {
     if (err.name === 'AbortError') {
-      logger.warn({ candidateId, phase: 'BARGE_IN' }, `[🛑 ABORT]: Gemini reasoning stream killed mid-flight.`);
+      logger.warn({ candidateId, phase: 'BARGE_IN' }, `[🛑 ABORT]: Gemini stream killed.`);
     } else {
       logger.error({ candidateId, phase: 'REASONING', err }, 'Gemini stream fatal error');
       throw err;
     }
   }
 }
-
