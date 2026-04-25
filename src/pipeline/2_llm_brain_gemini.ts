@@ -1,16 +1,16 @@
 import { WebSocket } from 'ws';
 import logger from '../utils/logger.js';
 
-// This is where we talk to the Gemini brain!
-const MODEL = "models/gemini-2.0-flash-exp";
+// We're using the brand new Gemini 2.5 Flash for faster responses!
+const MODEL = "models/gemini-2.5-flash";
 const HOST = "generativelanguage.googleapis.com";
 const URL = `wss://${HOST}/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${process.env.GEMINI_API_KEY}`;
 
-// Cerberus is our tough but fair interviewer persona.
+// This is how Cerberus should act during the interview.
 const SYSTEM_PROMPT = "You are Cerberus, a brutal Principal Engineer. Grill the candidate on system design and memory leaks. Max 2 punchy sentences.";
 
 /**
- * This function sets up a new connection to Gemini's live brain.
+ * This sets up the connection to Gemini and gives us back some tools to use it.
  */
 export const initGeminiLive = (
   candidateId: string,
@@ -20,14 +20,14 @@ export const initGeminiLive = (
   const ws = new WebSocket(URL);
   let sentenceBuffer = '';
 
-  // A simple helper to send messages to the brain.
+  // Helper to send data to Gemini as a JSON string.
   const send = (payload: object) => {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(payload));
     }
   };
 
-  // We use this to send text to the brain so it knows we're ready to chat.
+  // Helper to send text messages (turns) to the brain.
   const sendText = (text: string) => {
     send({
       clientContent: {
@@ -38,9 +38,9 @@ export const initGeminiLive = (
   };
 
   ws.on('open', () => {
-    logger.info({ candidateId }, `[🧬 READY]: Connected to the Gemini brain!`);
+    logger.info({ candidateId }, `[✅ READY]: Cerberus is awake and listening!`);
     
-    // First, we tell the brain who it should be (Cerberus).
+    // We send a 'setup' message first to tell Gemini which model and persona to use.
     send({
       setup: {
         model: MODEL,
@@ -55,27 +55,24 @@ export const initGeminiLive = (
   ws.on('message', (data) => {
     try {
       const response = JSON.parse(data.toString());
-      
-      // We check what kind of message the brain just sent us.
-      const messageType = Object.keys(response)[0];
-      
+
+      // If Gemini has finished setting up, we're good to go.
       if (response.setupComplete) {
-        logger.info({ candidateId }, `[✅ OK]: The brain is ready and waiting!`);
         return;
       }
 
-      // If the brain is talking, we catch its words here.
+      // If the brain sends us back some text tokens, we build them into sentences.
       if (response.serverContent?.modelTurn?.parts) {
         const parts = response.serverContent.modelTurn.parts;
         const token = parts[0]?.text || '';
 
         if (token) {
           sentenceBuffer += token;
-          // If we see a period or question mark, we know it finished a sentence.
+          // When we see a sentence-ending character, we send the whole thing back.
           if (/[.!?\n]/.test(token)) {
             const cleanSentence = sentenceBuffer.trim();
             if (cleanSentence) {
-              logger.info({ candidateId }, `[🧠 THINKING]: Cerberus said: ${cleanSentence}`);
+              logger.info({ candidateId }, `[💬 REPLY]: Cerberus says: ${cleanSentence}`);
               onReply(cleanSentence);
             }
             sentenceBuffer = '';
@@ -83,28 +80,24 @@ export const initGeminiLive = (
         }
       }
 
-      // If the brain heard you talking, it writes down what you said.
+      // If the brain transcribed what the user said, we can log it here.
       if (response.serverContent?.interimResults?.[0]?.alternatives?.[0]?.transcript) {
         const transcript = response.serverContent.interimResults[0].alternatives[0].transcript;
-        if (onTranscript) {
-          logger.info({ candidateId }, `[📝 WRITING]: I think you said: "${transcript}"`);
-          onTranscript(transcript);
-        }
+        if (onTranscript) onTranscript(transcript);
       }
 
     } catch (err) {
-      logger.error({ candidateId, err }, 'Oops! Something went wrong reading the brain\'s message.');
+      logger.error({ candidateId, err }, 'Something went wrong while reading the brain\'s response.');
     }
   });
 
   ws.on('error', (err) => {
-    logger.error({ candidateId, err }, 'The connection to the brain had a little hiccup.');
+    logger.error({ candidateId, err }, 'The brain connection hit a snag.');
   });
 
-  // We return these tools so the rest of the app can use the brain.
+  // We return these functions so we can send audio or text from outside.
   return {
     sendAudio: (buffer: Buffer) => {
-      // We send your voice data to the brain here.
       send({
         realtimeInput: {
           mediaChunks: [{
