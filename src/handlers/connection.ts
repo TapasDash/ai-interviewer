@@ -4,13 +4,12 @@ import { SessionState } from '../types/session.js';
 import logger from '../utils/logger.js';
 import { initGeminiLive } from '../pipeline/2_llm_brain_gemini.js';
 
+// We only let users send up to 16KB at a time to stay safe.
+const MAX_CHUNK_SIZE = 16 * 1024;
+
 /**
- * [ARCHITECT PROTOCOL - THE CONNECTION MANIFOLD]
- * Pure functional orchestrator for the Cerberus Live Pipeline.
+ * This helper creates a fresh "session box" to keep track of a user.
  */
-
-const MAX_CHUNK_SIZE = 16 * 1024; // 16KB strict MTU limit
-
 const createSession = (candidateId: string): SessionState => ({
   candidateId,
   startTime: Date.now(),
@@ -22,85 +21,106 @@ const createSession = (candidateId: string): SessionState => ({
   abortController: new AbortController(),
 });
 
+/**
+ * This is the main function that handles a new user connecting to us.
+ */
 export const handleConnection = (ws: WebSocket, req: IncomingMessage) => {
   const url = new URL(req.url || '', `http://${req.headers.host}`);
   const candidateId = url.searchParams.get('candidateId');
 
+  // If we don't know who you are, we can't start the chat!
   if (!candidateId) {
-    logger.warn({ phase: 'HANDSHAKE' }, 'Connection rejected: Missing candidateId');
+    logger.warn('Oops! Someone tried to join without an ID.');
     ws.close(1008, 'Missing candidateId');
     return;
   }
 
+  // We set up a new box for this user's data.
   const state = createSession(candidateId);
+  let voiceChunkCount = 0; 
   
-  /**
-   * [🧬 GEMINI LIVE INITIALIZATION]
-   * Establishes the bi-directional pipe immediately.
-   */
+  // We wake up the brain so it's ready to listen to this user.
   const gemini = initGeminiLive(
     candidateId,
     (sentence) => {
-      // AI Reply Logic: Guarded against dropped sockets
+      // If the brain has something to say, we send it back to the user.
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'text', content: sentence }));
       }
     },
     (transcript) => {
-      // User Transcript Logic
-      // This is primarily for forensic logging in Phase 2
+      // The brain is writing down what you said!
     }
   );
 
-  logger.info({ candidateId, phase: 'HANDSHAKE' }, `[👤 USER_JOINED]: Candidate ${candidateId} connected.`);
+  logger.info({ candidateId }, `[👋 HI]: A new person just joined the chat!`);
 
+  /**
+   * This part handles every message (voice or text) the user sends us.
+   */
   const handleMessage = async (data: any, isBinary: boolean) => {
     if (isBinary) {
-      /** [📥 INGRESS_BINARY]: Direct Piping to Gemini Live */
+      // If it's voice data, we make sure it's not too big.
       if (data.length > MAX_CHUNK_SIZE) {
-        logger.warn({ candidateId, phase: 'INGEST', bytes: data.length }, `[⚠️ MEM_VIOLATION]: Dropping chunk.`);
+        logger.warn({ candidateId }, `[⚠️ WHOA]: That voice message was a bit too large!`);
         return;
       }
 
+      voiceChunkCount++;
       state.totalBytesReceived += data.length;
       state.lastChunkTimestamp = Date.now();
 
-      // [🌊 AUDIO_IN]: Stream to Brain
+      // Every 10 chunks, we let you know we're still listening.
+      if (voiceChunkCount % 10 === 0) {
+        logger.info({ candidateId }, `[🎤 LISTENING]: I'm still hearing you loud and clear...`);
+      }
+
+      // We pass your voice straight to the brain.
       gemini.sendAudio(data);
 
     } else {
-      /** [📥 USER_SAID]: Text Probe Path */
+      // If it's a text message, we try to read what it says.
       let text = '';
       try {
         const payload = JSON.parse(data.toString());
         text = payload.content || '';
       } catch (err) {
-        logger.warn({ candidateId, phase: 'INGEST', err }, 'Malformed JSON ingress');
+        logger.warn({ candidateId }, 'I had trouble reading that text message.');
         return;
       }
 
       if (!text) return;
-      logger.debug({ candidateId, phase: 'INGEST' }, `[📥 USER_SAID]: ${candidateId} -> ${text}`);
-      
-      // Wire up text input directly to the Gemini LLM Brain
+
+      // If the user clicks "Start", we tell the brain to say hello.
+      if (text === 'START_INTERVIEW') {
+        logger.info({ candidateId }, `[🔥 KICKSTART]: Ready! Starting the interview now.`);
+        gemini.sendText("The candidate has joined. Introduce yourself as Cerberus and ask the first system design question.");
+        return;
+      }
+
+      logger.info({ candidateId }, `[💬 SAID]: User said: "${text}"`);
       gemini.sendText(text);
     }
   };
 
+  /**
+   * This part cleans everything up when the user leaves.
+   */
   const handleClose = () => {
     if (!state.isActive) return;
     state.isActive = false;
     
+    // We tell the brain we're done for now.
     state.abortController.abort(); 
-    gemini.close(); // Sever the AI link
+    gemini.close();
 
     (async () => {
       try {
-        logger.info({ candidateId, phase: 'TEARDOWN' }, `[💾 SAVING_WORK]: Closing session for ${candidateId}.`);
+        logger.info({ candidateId }, `[💾 SAVING]: Just taking a quick note of our chat before we close.`);
         await Promise.resolve();
-        logger.info({ candidateId, phase: 'TEARDOWN' }, `[✅ DONE]: Cleanup complete for ${candidateId}. Memory released.`);
+        logger.info({ candidateId }, `[✅ BYE]: All finished! Session is now closed.`);
       } catch (err) {
-        logger.error({ candidateId, phase: 'TEARDOWN', err }, 'Teardown failure');
+        logger.error({ candidateId, err }, 'I had a little trouble finishing the cleanup.');
       }
     })();
   };
@@ -108,7 +128,7 @@ export const handleConnection = (ws: WebSocket, req: IncomingMessage) => {
   ws.on('message', (data, isBinary) => handleMessage(data, isBinary));
   ws.on('close', handleClose);
   ws.on('error', (err) => {
-    logger.error({ candidateId, phase: 'HANDSHAKE', err }, 'Stream error');
+    logger.error({ candidateId, err }, 'There was a little trouble with the connection.');
     handleClose();
   });
 };
