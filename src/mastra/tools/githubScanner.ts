@@ -7,9 +7,9 @@ export const githubScanner = createTool({
   inputSchema: z.object({
     username: z.string().describe('The GitHub username of the candidate'),
   }),
-  execute: async ({ input }) => {
+  execute: async ({ username }) => {
     // Mock implementation for Project Cerberus Phase 3
-    console.log(`[🔍 SCANNER]: Scanning GitHub for ${input.username}`);
+    console.log(`[🔍 SCANNER]: Scanning GitHub for ${username}`);
     return {
       repositories: [
         { name: 'high-perf-node-engine', stars: 120, language: 'TypeScript' },

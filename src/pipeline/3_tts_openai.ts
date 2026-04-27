@@ -40,6 +40,10 @@ export const generateSpeechStream = async (
     // The response.body is a readable stream in Node.js
     const reader = response.body;
 
+    if (!reader) {
+      throw new Error('Response body is null');
+    }
+
     for await (const chunk of reader) {
       if (firstByte) {
         const ttfab = Date.now() - startTime;

@@ -34,7 +34,7 @@ const routerStep = createStep({
       `Analyze this candidate input and determine if we should drill down into code/Node internals (TECH_GRILL) or high-level architecture (SYSTEM_DESIGN). Input: "${transcript}"`
     );
     const decisionText = result.text.toUpperCase();
-    const phase = decisionText.includes('SYSTEM_DESIGN') ? 'SYSTEM_DESIGN' : 'TECH_GRILL';
+    const phase = (decisionText.includes('SYSTEM_DESIGN') ? 'SYSTEM_DESIGN' : 'TECH_GRILL') as 'SYSTEM_DESIGN' | 'TECH_GRILL';
     logger.info({ phase }, '[🧠 DIRECTOR]: Routing to specialized agent');
     return { phase, transcript };
   }
@@ -43,7 +43,7 @@ const routerStep = createStep({
 const techGrillStep = createStep({
   id: 'techGrill',
   inputSchema: z.object({
-    phase: z.string(),
+    phase: z.enum(['TECH_GRILL', 'SYSTEM_DESIGN']),
     transcript: z.string(),
   }),
   outputSchema: z.object({
@@ -59,7 +59,7 @@ const techGrillStep = createStep({
 const systemDesignStep = createStep({
   id: 'systemDesign',
   inputSchema: z.object({
-    phase: z.string(),
+    phase: z.enum(['TECH_GRILL', 'SYSTEM_DESIGN']),
     transcript: z.string(),
   }),
   outputSchema: z.object({
@@ -76,6 +76,9 @@ export const interviewFlow = createWorkflow({
   id: 'interview-flow',
   inputSchema: z.object({
     input: z.string(),
+  }),
+  outputSchema: z.object({
+    output: z.string(),
   }),
 })
   .then(receiveTextStep)

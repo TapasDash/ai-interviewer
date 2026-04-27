@@ -20,8 +20,6 @@ const logger = pino({
       ignore: 'pid,hostname',
     },
   } : undefined,
-  // Ensure we don't block the event loop with synchronous writes
-  async: true,
 });
 
 export default logger;
