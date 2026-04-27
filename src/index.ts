@@ -1,6 +1,6 @@
 import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
-import { handleConnection } from './handlers/connection.js';
+import { handleConnection } from './manifold/connection.js';
 import logger from './utils/logger.js';
 import dotenv from 'dotenv';
 

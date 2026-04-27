@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CERBERUS PROBE v1.2 - LIVE UPLINK</title>
+    <title>CERBERUS PROBE v1.4 - A2A ENABLED</title>
     <style>
         :root {
             --bg: #0f172a;
@@ -68,8 +68,6 @@
             padding-left: 10px;
         }
 
-        .log-in { border-left-color: var(--accent); color: var(--accent); }
-        .log-out { border-left-color: var(--success); color: var(--success); }
         .log-sys { border-left-color: #64748b; color: #94a3b8; }
         .log-mic { border-left-color: var(--warning); color: var(--warning); }
         .log-ai { border-left-color: var(--highlight); color: var(--highlight); font-weight: bold; }
@@ -90,22 +88,7 @@
             border-radius: 8px;
         }
 
-        .row {
-            display: flex;
-            gap: 10px;
-            align-items: center;
-        }
-
-        input {
-            flex-grow: 1;
-            background: var(--terminal-bg);
-            border: 1px solid #334155;
-            color: var(--accent);
-            padding: 12px;
-            border-radius: 4px;
-            outline: none;
-            font-family: inherit;
-        }
+        .row { display: flex; gap: 10px; align-items: center; }
 
         button {
             border: none;
@@ -121,13 +104,10 @@
         .btn-kickstart { background: linear-gradient(to right, #f97316, #ef4444); color: white; }
         .btn-mic-start { background: var(--warning); color: var(--bg); }
         .btn-mic-stop { background: var(--error); color: var(--text); }
-        .btn-send { background: var(--accent); color: var(--bg); }
 
         button:hover { opacity: 0.8; transform: scale(1.02); }
-        button:active { transform: scale(0.98); }
-        button:disabled { opacity: 0.3; cursor: not-allowed; filter: grayscale(1); }
+        button:disabled { opacity: 0.3; cursor: not-allowed; }
 
-        /* WAVEFORM ANIMATION */
         .waveform {
             display: none;
             gap: 3px;
@@ -148,113 +128,128 @@
             50% { height: 20px; }
         }
 
-        .bar:nth-child(2) { animation-delay: 0.1s; }
-        .bar:nth-child(3) { animation-delay: 0.2s; }
-        .bar:nth-child(4) { animation-delay: 0.3s; }
+        .bar-ai { background: var(--highlight); }
     </style>
 </head>
 <body>
     <header>
         <div style="font-size: 20px; font-weight: bold; letter-spacing: 2px;">
-            PROJECT <span style="color: var(--accent)">CERBERUS</span> PROBE v1.2
+            PROJECT <span style="color: var(--accent)">CERBERUS</span> PROBE v1.4
         </div>
         <div id="status" class="status-pill status-closed">Disconnected</div>
     </header>
 
-    <div id="terminal">
-        <div class="log-entry log-sys">
-            <span class="timestamp">[SYS]</span> Initializing Cerberus Live Uplink...
-        </div>
-    </div>
+    <div id="terminal"></div>
 
     <div class="controls">
         <div class="row">
             <button id="kickstart" class="btn-kickstart">🔥 Kickstart Interview</button>
-            <button id="mic-start" class="btn-mic-start">🎤 Start Mic</button>
-            <button id="mic-stop" class="btn-mic-stop" disabled>🛑 Stop & Interrupt</button>
+            <button id="mic-start" class="btn-mic-start">🎤 Start Session</button>
+            <button id="mic-stop" class="btn-mic-stop" disabled>🛑 Stop Mic</button>
             
             <div id="wave-container" class="waveform">
                 <div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
-                <span style="color: var(--warning); font-size: 10px; margin-left: 5px;">LIVE 16KHZ</span>
+                <span id="wave-text" style="color: var(--warning); font-size: 10px; margin-left: 5px;">A2A ACTIVE</span>
             </div>
         </div>
-
-        <form class="row" id="probe-form">
-            <input type="text" id="probe-input" placeholder="Speak to Cerberus or type here..." autocomplete="off">
-            <button type="submit" id="probe-send" class="btn-send">Send</button>
-        </form>
     </div>
 
     <script>
         const terminal = document.getElementById('terminal');
         const statusPill = document.getElementById('status');
-        const form = document.getElementById('probe-form');
-        const input = document.getElementById('probe-input');
-        const sendBtn = document.getElementById('probe-send');
         const kickstartBtn = document.getElementById('kickstart');
-        
         const micStartBtn = document.getElementById('mic-start');
         const micStopBtn = document.getElementById('mic-stop');
         const waveform = document.getElementById('wave-container');
+        const waveText = document.getElementById('wave-text');
 
         const CANDIDATE_ID = 'tester_forensic_001';
         const WS_URL = `ws://localhost:8080?candidateId=${CANDIDATE_ID}`;
 
         let ws = null;
-        let audioContext = null;
+        let audioCtx = null;
         let micStream = null;
         let processor = null;
 
+        // [SPEAKER STATE]
+        let nextStartTime = 0;
+        const SAMPLE_RATE = 16000;
+
         function log(msg, type = 'sys') {
             const entry = document.createElement('div');
-            
-            // AUTOMATIC FORENSIC HIGHLIGHTING
-            let finalType = type;
-            if (msg.includes('[📤 AI_REPLYING]')) finalType = 'ai';
-            if (msg.includes('[📝 STT_FINAL]')) finalType = 'stt';
-
-            entry.className = `log-entry log-${finalType}`;
-            const time = new Date().toLocaleTimeString('en-US', { hour12: false, fractionDigits: 3 });
+            entry.className = `log-entry log-${type}`;
+            const time = new Date().toLocaleTimeString('en-US', { hour12: false });
             entry.innerHTML = `<span class="timestamp">[${time}]</span> ${msg}`;
-            
             terminal.appendChild(entry);
             terminal.scrollTop = terminal.scrollHeight;
         }
 
-        function updateStatus(state) {
-            statusPill.textContent = state;
-            statusPill.className = `status-pill status-${state.toLowerCase()}`;
-            const isOpen = state === 'OPEN';
-            sendBtn.disabled = !isOpen;
-            micStartBtn.disabled = !isOpen;
-            kickstartBtn.disabled = !isOpen;
+        async function initAudio() {
+            if (audioCtx) return;
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+            nextStartTime = audioCtx.currentTime;
+            log('Audio Engine Online (16kHz).', 'sys');
+        }
+
+        /**
+         * playPCM: Gapless binary playback.
+         * Converts raw Int16 binary data to Float32 and schedules it.
+         */
+        function playPCM(arrayBuffer) {
+            if (!audioCtx) return;
+
+            const int16Data = new Int16Array(arrayBuffer);
+            const float32Data = new Float32Array(int16Data.length);
+            
+            for (let i = 0; i < int16Data.length; i++) {
+                float32Data[i] = int16Data[i] / 32768.0;
+            }
+
+            const buffer = audioCtx.createBuffer(1, float32Data.length, SAMPLE_RATE);
+            buffer.copyToChannel(float32Data, 0);
+
+            const source = audioCtx.createBufferSource();
+            source.buffer = buffer;
+            source.connect(audioCtx.destination);
+
+            // Schedule for gapless playback
+            const start = Math.max(audioCtx.currentTime, nextStartTime);
+            source.start(start);
+            nextStartTime = start + buffer.duration;
+
+            // Visual feedback
+            waveText.textContent = 'CERBERUS SPEAKING...';
+            waveText.style.color = 'var(--highlight)';
+            Array.from(document.querySelectorAll('.bar')).forEach(b => b.classList.add('bar-ai'));
         }
 
         async function startMic() {
+            await initAudio();
             try {
-                audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
                 micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                const source = audioContext.createMediaStreamSource(micStream);
-                processor = audioContext.createScriptProcessor(4096, 1, 1);
-
+                const source = audioCtx.createMediaStreamSource(micStream);
+                processor = audioCtx.createScriptProcessor(4096, 1, 1);
                 source.connect(processor);
-                processor.connect(audioContext.destination);
+                processor.connect(audioCtx.destination);
 
                 processor.onaudioprocess = (e) => {
                     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-                    const float32Data = e.inputBuffer.getChannelData(0);
-                    const int16Data = new Int16Array(float32Data.length);
-                    for (let i = 0; i < float32Data.length; i++) {
-                        const s = Math.max(-1, Math.min(1, float32Data[i]));
-                        int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                    const float32 = e.inputBuffer.getChannelData(0);
+                    const int16 = new Int16Array(float32.length);
+                    for (let i = 0; i < float32.length; i++) {
+                        const s = Math.max(-1, Math.min(1, float32[i]));
+                        int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
                     }
-                    ws.send(int16Data.buffer);
+                    ws.send(int16.buffer);
                 };
 
                 micStartBtn.disabled = true;
                 micStopBtn.disabled = false;
                 waveform.style.display = 'flex';
-                log('ELITE_EAR: High-frequency PCM stream active.', 'mic');
+                waveText.textContent = 'LISTENING...';
+                waveText.style.color = 'var(--warning)';
+                Array.from(document.querySelectorAll('.bar')).forEach(b => b.classList.remove('bar-ai'));
+                log('Mic Active.', 'mic');
 
             } catch (err) {
                 log(`MIC_ERROR: ${err.message}`, 'error');
@@ -264,63 +259,45 @@
         function stopMic() {
             if (processor) processor.disconnect();
             if (micStream) micStream.getTracks().forEach(t => t.stop());
-            if (audioContext) audioContext.close();
             micStartBtn.disabled = false;
             micStopBtn.disabled = true;
             waveform.style.display = 'none';
-            log('ELITE_EAR: Stream terminated.', 'mic');
+            log('Mic Deactivated.', 'mic');
         }
 
         function connect() {
-            log(`Uplink: Opening live pipe to ${WS_URL}...`, 'sys');
             ws = new WebSocket(WS_URL);
             ws.binaryType = 'arraybuffer';
 
             ws.onopen = () => {
-                log('Forensic Uplink Established.', 'sys');
-                updateStatus('OPEN');
+                log('Handshake Secure.', 'sys');
+                statusPill.textContent = 'OPEN';
+                statusPill.className = 'status-pill status-open';
             };
 
-            ws.onmessage = (event) => {
-                try {
-                    const data = JSON.parse(event.data);
-                    // Check if it's a raw log or a structured message
-                    if (data.type === 'text') {
-                        log(`[📤 AI_REPLYING]: ${data.content}`, 'ai');
-                    } else if (data.transcript) {
-                        log(`[📝 STT_FINAL]: "${data.transcript}"`, 'stt');
-                    } else {
-                        log(`RECV: ${JSON.stringify(data)}`, 'in');
-                    }
-                } catch (e) {
-                    log(`RAW_DATA: ${event.data.byteLength || event.data.length} bytes`, 'in');
+            ws.onmessage = (e) => {
+                if (e.data instanceof ArrayBuffer) {
+                    playPCM(e.data);
+                } else {
+                    const data = JSON.parse(e.data);
+                    if (data.type === 'text') log(`Cerberus: ${data.content}`, 'ai');
+                    if (data.type === 'transcript') log(`[📝 STT]: ${data.content}`, 'stt');
                 }
             };
 
             ws.onclose = () => {
-                log('Uplink severed.', 'error');
-                updateStatus('CLOSED');
-                stopMic();
-                setTimeout(connect, 3000);
+                statusPill.textContent = 'CLOSED';
+                statusPill.className = 'status-pill status-closed';
+                setTimeout(connect, 2000);
             };
         }
 
-        form.onsubmit = (e) => {
-            e.preventDefault();
-            const val = input.value.trim();
-            if (!val || !ws || ws.readyState !== WebSocket.OPEN) return;
-            ws.send(JSON.stringify({ type: 'text', content: val }));
-            log(`USER_TEXT: ${val}`, 'out');
-            input.value = '';
-        };
-
-        kickstartBtn.onclick = () => {
-            ws.send(JSON.stringify({ type: 'text', content: 'START_INTERVIEW' }));
-            log('IGNITION: Manual Kickstart sent.', 'sys');
-        };
-
         micStartBtn.onclick = startMic;
         micStopBtn.onclick = stopMic;
+        kickstartBtn.onclick = () => {
+            ws.send(JSON.stringify({ type: 'text', content: 'START_INTERVIEW' }));
+            log('IGNITION: Interview kickstarted.', 'sys');
+        };
 
         connect();
     </script>

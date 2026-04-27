@@ -1,113 +1,140 @@
-import { WebSocket } from 'ws';
+import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
 import logger from '../utils/logger.js';
 
-// We're using the brand new Gemini 2.5 Flash for faster responses!
-const MODEL = "models/gemini-2.5-flash";
-const HOST = "generativelanguage.googleapis.com";
-const URL = `wss://${HOST}/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${process.env.GEMINI_API_KEY}`;
+/**
+ * [ARCHITECT PROTOCOL - THE AGENTIC BRAIN]
+ * Version: v3 (Agentic) | Model: Gemini 2.5 Flash
+ * Objective: Autonomous Technical Interviewer with Function Calling
+ */
 
-// This is how Cerberus should act during the interview.
-const SYSTEM_PROMPT = "You are Cerberus, a brutal Principal Engineer. Grill the candidate on system design and memory leaks. Max 2 punchy sentences.";
+const MODEL_ID = "gemini-2.5-flash";
 
 /**
- * This sets up the connection to Gemini and gives us back some tools to use it.
+ * TOOL DEFINITIONS: The Agent's interactions with the interview state.
  */
-export const initGeminiLive = (
+const tools = [
+  {
+    functionDeclarations: [
+      {
+        name: "score_answer",
+        description: "Evaluates the candidate's technical response for a specific topic.",
+        parameters: {
+          type: SchemaType.OBJECT,
+          properties: {
+            topic: { type: SchemaType.STRING, description: "The technical topic being evaluated (e.g., Event Loop, Memory Leaks)." },
+            score: { type: SchemaType.NUMBER, description: "Score from 1 to 10." },
+            reasoning: { type: SchemaType.STRING, description: "Brief justification for the score." }
+          },
+          required: ["topic", "score", "reasoning"]
+        }
+      },
+      {
+        name: "pivot_topic",
+        description: "Changes the focus of the interview to a new technical area.",
+        parameters: {
+          type: SchemaType.OBJECT,
+          properties: {
+            new_topic: { type: SchemaType.STRING, description: "The new topic to transition to." }
+          },
+          required: ["new_topic"]
+        }
+      }
+    ]
+  }
+];
+
+const SYSTEM_PROMPT = `
+You are Cerberus, an autonomous Agentic Technical Interviewer. 
+Your objective is to exhaustively verify the candidate's backend depth.
+RULES:
+1. If an answer is weak, use score_answer to flag it and drill deeper.
+2. If an answer is strong, use score_answer to escalate difficulty.
+3. Use pivot_topic when a subject is exhausted.
+4. Be brutal, punchy, and professional. Max 2 sentences per response.
+`;
+
+/**
+ * initGeminiAgent: Factory for the Autonomous Agent Stage.
+ */
+export const initGeminiAgent = (
   candidateId: string,
-  onReply: (text: string) => void,
-  onTranscript?: (text: string) => void
+  onToken: (token: string) => void,
+  onSentence: (sentence: string) => void
 ) => {
-  const ws = new WebSocket(URL);
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    logger.error({ candidateId }, '[FATAL] GEMINI_API_KEY is missing!');
+    throw new Error('GEMINI_API_KEY_UNDEFINED');
+  }
+
+  // Agent State via Closure
+  const interviewState = {
+    topicsCovered: [] as string[],
+    scores: [] as any[],
+    difficulty: 5
+  };
+
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const model = genAI.getGenerativeModel({ 
+    model: MODEL_ID,
+    systemInstruction: SYSTEM_PROMPT,
+    tools: tools as any
+  });
+
+  const chat = model.startChat();
   let sentenceBuffer = '';
 
-  // Helper to send data to Gemini as a JSON string.
-  const send = (payload: object) => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(payload));
-    }
-  };
+  return {
+    processText: async (text: string) => {
+      logger.info({ candidateId }, '[🤖 AGENT_THINKING]: Evaluating input...');
+      const startTime = Date.now();
 
-  // Helper to send text messages (turns) to the brain.
-  const sendText = (text: string) => {
-    send({
-      clientContent: {
-        turns: [{ role: "user", parts: [{ text }] }],
-        turnComplete: true
-      }
-    });
-  };
-
-  ws.on('open', () => {
-    logger.info({ candidateId }, `[✅ READY]: Cerberus is awake and listening!`);
-    
-    // We send a 'setup' message first to tell Gemini which model and persona to use.
-    send({
-      setup: {
-        model: MODEL,
-        generationConfig: { responseModalities: ["TEXT"] },
-        systemInstruction: {
-          parts: [{ text: SYSTEM_PROMPT }]
-        }
-      }
-    });
-  });
-
-  ws.on('message', (data) => {
-    try {
-      const response = JSON.parse(data.toString());
-
-      // If Gemini has finished setting up, we're good to go.
-      if (response.setupComplete) {
-        return;
-      }
-
-      // If the brain sends us back some text tokens, we build them into sentences.
-      if (response.serverContent?.modelTurn?.parts) {
-        const parts = response.serverContent.modelTurn.parts;
-        const token = parts[0]?.text || '';
-
-        if (token) {
-          sentenceBuffer += token;
-          // When we see a sentence-ending character, we send the whole thing back.
-          if (/[.!?\n]/.test(token)) {
-            const cleanSentence = sentenceBuffer.trim();
-            if (cleanSentence) {
-              logger.info({ candidateId }, `[💬 REPLY]: Cerberus says: ${cleanSentence}`);
-              onReply(cleanSentence);
+      try {
+        const result = await chat.sendMessageStream(text);
+        
+        for await (const chunk of result.stream) {
+          // 1. Check for Tool Calls (Function Calls)
+          const calls = chunk.functionCalls();
+          if (calls) {
+            for (const call of calls) {
+              const { name, args } = call;
+              logger.info({ candidateId, tool: name, args }, "[🛠️ AGENT_ACTION]: Executing autonomous tool...");
+              
+              // Handle tool logic asynchronously
+              if (name === 'score_answer') {
+                interviewState.scores.push(args);
+                if ((args as any).score > 7) interviewState.difficulty++;
+              } else if (name === 'pivot_topic') {
+                interviewState.topicsCovered.push((args as any).new_topic);
+              }
             }
-            sentenceBuffer = '';
+          }
+
+          // 2. Stream standard text tokens
+          const token = chunk.text();
+          if (token) {
+            onToken(token);
+            sentenceBuffer += token;
+
+            if (/[.!?\n]/.test(token)) {
+              const sentences = sentenceBuffer.split(/(?<=[.!?\n])/);
+              sentenceBuffer = sentences.pop() || '';
+              for (const s of sentences) {
+                const clean = s.trim();
+                if (clean) onSentence(clean);
+              }
+            }
           }
         }
-      }
 
-      // If the brain transcribed what the user said, we can log it here.
-      if (response.serverContent?.interimResults?.[0]?.alternatives?.[0]?.transcript) {
-        const transcript = response.serverContent.interimResults[0].alternatives[0].transcript;
-        if (onTranscript) onTranscript(transcript);
-      }
-
-    } catch (err) {
-      logger.error({ candidateId, err }, 'Something went wrong while reading the brain\'s response.');
-    }
-  });
-
-  ws.on('error', (err) => {
-    logger.error({ candidateId, err }, 'The brain connection hit a snag.');
-  });
-
-  // We return these functions so we can send audio or text from outside.
-  return {
-    sendAudio: (buffer: Buffer) => {
-      send({
-        realtimeInput: {
-          mediaChunks: [{
-            mimeType: "audio/pcm;rate=16000",
-            data: buffer.toString('base64')
-          }]
+        if (sentenceBuffer.trim()) {
+          onSentence(sentenceBuffer.trim());
+          sentenceBuffer = '';
         }
-      });
-    },
-    sendText,
-    close: () => ws.close()
+
+      } catch (err) {
+        logger.error({ candidateId, err }, 'Agentic Stream Error');
+      }
+    }
   };
 };
